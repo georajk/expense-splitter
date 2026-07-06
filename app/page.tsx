@@ -230,30 +230,7 @@ export default function HomePage() {
 
         <section className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
           <div className="space-y-6">
-            <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-card">
-              <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                  <h2 className="text-lg font-semibold text-slate-900">People</h2>
-                  <p className="mt-1 text-sm text-slate-600">Edit person names and the app will use them everywhere.</p>
-                </div>
-              </div>
-              <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                {people.map((person, index) => (
-                  <label key={person.id} className="block rounded-2xl border border-slate-200 bg-slate-50 p-3 shadow-sm focus-within:border-sky-500 focus-within:ring-2 focus-within:ring-sky-200">
-                    <span className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Person {index + 1}</span>
-                    <input
-                      type="text"
-                      value={person.name}
-                      onChange={(event) => {
-                        setPeople((current) => current.map((item) => item.id === person.id ? { ...item, name: event.target.value } : item));
-                      }}
-                      className="mt-2 w-full border-0 bg-transparent px-0 text-lg font-semibold text-slate-900 outline-none placeholder:text-slate-400"
-                      placeholder={`Person ${index + 1}`}
-                    />
-                  </label>
-                ))}
-              </div>
-            </div>
+
 
             <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-card">
               <h2 className="text-lg font-semibold text-slate-900">Expense Form</h2>
