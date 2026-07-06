@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import type { Database } from '../types/db';
 
@@ -21,8 +21,6 @@ const INITIAL_PEOPLE: Person[] = [
   { id: 'person-4', name: 'Geo' },
 ];
 
-const STORAGE_KEY = 'trip-expense-splitter-v1';
-
 function formatMoney(value: number) {
   return `£${value.toFixed(2)}`;
 }
@@ -35,6 +33,42 @@ function formatDateLabel(dateString: string) {
   }).format(date);
 }
 
+function normalizeSplitAmong(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return [];
+    }
+
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+          .map((item) => item.trim())
+          .filter(Boolean);
+      }
+    } catch {
+      // Fall back to a simple comma/bracket split below.
+    }
+
+    return trimmed
+      .replace(/^\[|\]$/g, '')
+      .split(',')
+      .map((item) => item.trim().replace(/^['"]|['"]$/g, ''))
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
 function buildSummary(people: Person[], expenses: Expense[]) {
   const summary = people.reduce((acc, person) => {
     acc[person.id] = { paid: 0, owes: 0 };
@@ -42,9 +76,19 @@ function buildSummary(people: Person[], expenses: Expense[]) {
   }, {} as Record<string, { paid: number; owes: number }>);
 
   expenses.forEach((expense) => {
-    const share = expense.amount / expense.splitAmong.length;
+    const splitAmong = normalizeSplitAmong(expense.splitAmong);
+    const share = expense.amount / (splitAmong.length || 1);
+
+    if (!summary[expense.paidBy]) {
+      summary[expense.paidBy] = { paid: 0, owes: 0 };
+    }
+
     summary[expense.paidBy].paid += expense.amount;
-    expense.splitAmong.forEach((personId) => {
+
+    splitAmong.forEach((personId) => {
+      if (!summary[personId]) {
+        summary[personId] = { paid: 0, owes: 0 };
+      }
       summary[personId].owes += share;
     });
   });
@@ -62,10 +106,8 @@ function getDefaultDate() {
   return today.toISOString().slice(0, 10);
 }
 
-const SUPABASE_TABLE = 'TripExpense' as const;
-
 export default function HomePage() {
-  const [people, setPeople] = useState<Person[]>(INITIAL_PEOPLE);
+  const [people] = useState<Person[]>(INITIAL_PEOPLE);
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [date, setDate] = useState(getDefaultDate());
@@ -77,32 +119,59 @@ export default function HomePage() {
   const [confirmClear, setConfirmClear] = useState(false);
   const [supabaseError, setSupabaseError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const supabase = createClient<Database>(
-    process.env.NEXT_PUBLIC_SUPABASE_URL ?? '',
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ''
-  );
+  const supabase = useMemo(() => {
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-  useEffect(() => {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      try {
-        const data = JSON.parse(raw) as { people: Person[]; expenses: Expense[] };
-        if (Array.isArray(data.people) && Array.isArray(data.expenses)) {
-          setPeople(data.people);
-          setExpenses(data.expenses);
-        }
-      } catch {
-        window.localStorage.removeItem(STORAGE_KEY);
-      }
+    if (!url || !key) {
+      return null;
     }
+
+    return createClient<Database>(url, key);
   }, []);
 
+  const fetchExpenses = useCallback(async () => {
+    if (!supabase) {
+      setSupabaseError('Supabase is not configured');
+      return;
+    }
+
+    setLoading(true);
+    setSupabaseError(null);
+
+    try {
+      const { data, error } = await (supabase as any)
+        .from('TripExpense')
+        .select('*')
+        .order('date', { ascending: false });
+
+      if (error) {
+        setSupabaseError(error.message);
+        setExpenses([]);
+        return;
+      }
+
+      setExpenses(
+        (data ?? []).map((row: any) => ({
+          id: row.id,
+          date: row.date,
+          name: row.item,
+          amount: row.amount,
+          paidBy: row.paid_by,
+          splitAmong: normalizeSplitAmong(row.split_among),
+        }))
+      );
+    } catch {
+      setSupabaseError('Unable to load expenses from Supabase');
+      setExpenses([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [supabase]);
+
   useEffect(() => {
-    window.localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({ people, expenses })
-    );
-  }, [people, expenses]);
+    void fetchExpenses();
+  }, [fetchExpenses]);
 
   const filteredExpenses = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -119,6 +188,8 @@ export default function HomePage() {
     acc[person.id] = person.name;
     return acc;
   }, {} as Record<string, string>);
+
+  const getPersonName = (personId: string) => selectedPeople[personId] ?? personId;
 
   const togglePerson = (personId: string) => {
     if (splitAmong.includes(personId)) {
@@ -147,10 +218,16 @@ export default function HomePage() {
   };
 
   const saveExpenseToSupabase = async (expense: Expense) => {
+    if (!supabase) {
+      setSupabaseError('Supabase is not configured');
+      return false;
+    }
+
     setSupabaseError(null);
     setLoading(true);
+
     try {
-      const insertPayload: Database['public']['Tables']['TripExpense']['Insert'] = {
+      const payload: Database['public']['Tables']['TripExpense']['Insert'] = {
         id: expense.id,
         date: expense.date,
         item: expense.name,
@@ -158,14 +235,21 @@ export default function HomePage() {
         split_among: expense.splitAmong,
         paid_by: expense.paidBy,
       };
-      const response = await supabase
-        .from('TripExpense' as const)
-        .insert([insertPayload] as any);
+
+      const response = editId
+        ? await (supabase as any).from('TripExpense').update(payload).eq('id', expense.id)
+        : await (supabase as any).from('TripExpense').insert([payload]);
+
       if (response.error) {
         setSupabaseError(response.error.message);
+        return false;
       }
-    } catch (error) {
+
+      await fetchExpenses();
+      return true;
+    } catch {
       setSupabaseError('Unable to save expense to Supabase');
+      return false;
     } finally {
       setLoading(false);
     }
@@ -187,15 +271,11 @@ export default function HomePage() {
       splitAmong,
     };
 
-    setExpenses((current) => {
-      const next = editId
-        ? current.map((item) => (item.id === editId ? expense : item))
-        : [expense, ...current];
-      return next;
-    });
+    const saved = await saveExpenseToSupabase(expense);
 
-    resetForm();
-    await saveExpenseToSupabase(expense);
+    if (saved) {
+      resetForm();
+    }
   };
 
   const handleEdit = (expense: Expense) => {
@@ -207,17 +287,62 @@ export default function HomePage() {
     setSplitAmong(expense.splitAmong);
   };
 
-  const handleDelete = (expenseId: string) => {
-    setExpenses((current) => current.filter((expense) => expense.id !== expenseId));
+  const handleDelete = async (expenseId: string) => {
+    if (!supabase) {
+      setSupabaseError('Supabase is not configured');
+      return;
+    }
+
+    setSupabaseError(null);
+    setLoading(true);
+
+    try {
+      const { error } = await (supabase as any).from('TripExpense').delete().eq('id', expenseId);
+      if (error) {
+        setSupabaseError(error.message);
+        return;
+      }
+
+      await fetchExpenses();
+    } catch {
+      setSupabaseError('Unable to delete expense from Supabase');
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const handleClearAll = () => {
+  const handleClearAll = async () => {
     if (!confirmClear) {
       setConfirmClear(true);
       return;
     }
-    setExpenses([]);
-    setConfirmClear(false);
+
+    if (!supabase) {
+      setSupabaseError('Supabase is not configured');
+      setConfirmClear(false);
+      return;
+    }
+
+    setSupabaseError(null);
+    setLoading(true);
+
+    try {
+      const expenseIds = expenses.map((expense) => expense.id);
+      if (expenseIds.length) {
+        const { error } = await (supabase as any).from('TripExpense').delete().in('id', expenseIds);
+        if (error) {
+          setSupabaseError(error.message);
+          return;
+        }
+      }
+
+      await fetchExpenses();
+      setConfirmClear(false);
+    } catch {
+      setSupabaseError('Unable to clear expenses from Supabase');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -327,7 +452,8 @@ export default function HomePage() {
 
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div className="space-y-1">
-                    <p className="text-sm font-medium text-slate-700">Expenses saved locally in your browser.</p>
+                    <p className="text-sm font-medium text-slate-700">Expenses are synced with your Supabase table.</p>
+                    {loading && <p className="text-sm text-slate-500">Syncing data…</p>}
                     {supabaseError && <p className="text-sm text-red-600">Supabase: {supabaseError}</p>}
                   </div>
                   <button
@@ -452,8 +578,8 @@ export default function HomePage() {
                       <td className="px-3 py-4 text-slate-700">{formatDateLabel(expense.date)}</td>
                       <td className="px-3 py-4 text-slate-700">{expense.name}</td>
                       <td className="px-3 py-4 text-slate-700">{formatMoney(expense.amount)}</td>
-                      <td className="px-3 py-4 text-slate-700">{selectedPeople[expense.paidBy]}</td>
-                      <td className="px-3 py-4 text-slate-700">{expense.splitAmong.map((id) => selectedPeople[id]).join(', ')}</td>
+                      <td className="px-3 py-4 text-slate-700">{getPersonName(expense.paidBy)}</td>
+                      <td className="px-3 py-4 text-slate-700">{expense.splitAmong.map((id) => getPersonName(id)).join(', ')}</td>
                       <td className="px-3 py-4 text-slate-700">{formatMoney(expense.amount / expense.splitAmong.length)}</td>
                       <td className="px-3 py-4 space-x-2 text-slate-700">
                         <button
