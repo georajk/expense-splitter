@@ -6,7 +6,7 @@ export interface Database {
       TripExpense: {
         Row: {
           id: string;
-          createdat: string;
+          date: string;
           item: string;
           amount: number;
           split_among: string[];
@@ -14,7 +14,7 @@ export interface Database {
         };
         Insert: {
           id?: string;
-          createdat?: string;
+          date?: string;
           item: string;
           amount: number;
           split_among: string[];
@@ -22,7 +22,7 @@ export interface Database {
         };
         Update: {
           id?: string;
-          createdat?: string;
+          date?: string;
           item?: string;
           amount?: number;
           split_among?: string[];
